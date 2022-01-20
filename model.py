@@ -24,7 +24,7 @@ activation_and_inits = {
 CHANNEL_MULT = 2
 
 class VariationalAutoencoder(tf.keras.Model):
-    def __init__(self, args, model_arch, in_shape, name="Variational_AutoEncoder", **kwargs):
+    def __init__(self, args, model_arch, batch_size, in_shape, name="Variational_AutoEncoder", **kwargs):
         super().__init__(name=name, **kwargs)
         # self.writer = writer
         self.model_name = name
@@ -32,7 +32,7 @@ class VariationalAutoencoder(tf.keras.Model):
         self.dataset = args.dataset
         self.crop_output = self.dataset in {'mnist', 'omniglot', 'stacked_mnist'}
         self.use_se = args.use_se
-        self.batch_size = args.batch_size
+        self.batch_size = batch_size
 
         self.num_scales = args.num_scales
         self.num_groups_per_scale = args.num_groups_per_scale

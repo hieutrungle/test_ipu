@@ -2,8 +2,8 @@ import os
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import configargparse
-from tensorflow.python.ops.numpy_ops import np_config
-np_config.enable_numpy_behavior()
+# from tensorflow.python.ops.numpy_ops import np_config
+# np_config.enable_numpy_behavior()
 from utils import utils
 from train import train
 from eval import evaluate
@@ -16,11 +16,17 @@ from utils.normalizer import DataNormalizer
 from utils.padder import Padder
 import numpy as np
 import tensorflow as tf
+import timeit
+
+from tensorflow.python import ipu
+
+# Configure the IPU device.
+config = ipu.config.IPUConfig()
+config.auto_select_ipus = 1
+config.configure_ipu_system()
+
 
 def main(args):
-    
-    strategy = tf.distributed.MirrorStrategy()
-    glocal_batch_size = args.batch_size * strtegy.num_per_replicas
     
     dataio = data_io.Data(args.data_path, args.batch_size)
     if args.dataset == "mnist":
@@ -36,70 +42,85 @@ def main(args):
         print(f"Data: Huricane ISABEL")
         sys.exit()
     
+    strategy = ipu.ipu_strategy.IPUStrategy()
+    batch_size = args.batch_size
+    data_set = tf.data.Dataset.zip((data, data))
+    with strategy.scope():
     
-    
-    # Model Initialization
-    in_shape = list(data.element_spec.shape[1:])
-    model_arch = utils.get_model_arch(args.model_arch)
-    print(f"model_arch: {args.model_arch}")
-
-    vae = VariationalAutoencoder(args, model_arch, in_shape)
-    print(f"is using se: {vae.use_se}\n")
-    vae.build(input_shape=([None]+ in_shape))
-    vae.model().summary()
-
-    # Set up for training, evaluation, or generation
-    model_path = args.model_path
-    print(f"\nlogging information to: {model_path}\n")
-    
-    resume_checkpoint={}
-    if args.resume or args.generate:
-        weight_path = model_path + '/checkpoints/' + f'model_{args.iter:06d}'
-        vae.load_weights(weight_path)
-        if args.resume:
-            print(f"Resume trainig...")
-            resume_checkpoint['resume_epoch'] = args.iter
-            print(resume_checkpoint)
-        print(f"Model weights successfully loaded.")
+        # Model Initialization
+        in_shape = list(data.element_spec.shape[1:])
+        model_arch = utils.get_model_arch(args.model_arch)
+        print(f"model_arch: {args.model_arch}")
         
-    # sys.exit()
+        
+        vae = VariationalAutoencoder(args, model_arch, batch_size, in_shape)
+        print(f"is using se: {vae.use_se}\n")
+        # vae.build(input_shape=([None]+ in_shape))
+        vae.model().summary()
 
-    # Training, Generating, or Evaluating the model
-    if args.generate:
-        print(f"Generating images...")
-        if (args.dataset == "mnist"):
-            gen_sample = [sample for sample in data.take(2)][0]
-            generate(vae, gen_sample, args.path_img_output)
-        elif (args.dataset == "cloud"):
-            reconstruct_img(vae, data, normalizer=normalizer, padder=padder, 
-                            img_folder=args.path_img_output, prefix_name='cloud')
-    else:
-        if args.eval:
-            print("Evaluation...")
-            evaluate(vae, data, model_path=model_path, 
-                    save_encoding=args.save_encoding, padding=None)
+        # Set up for training, evaluation, or generation
+        model_path = args.model_path
+        print(f"\nlogging information to: {model_path}\n")
+        
+        resume_checkpoint={}
+        if args.resume or args.generate:
+            weight_path = model_path + '/checkpoints/' + f'model_{args.iter:06d}'
+            vae.load_weights(weight_path)
+            if args.resume:
+                print(f"Resume trainig...")
+                resume_checkpoint['resume_epoch'] = args.iter
+                print(resume_checkpoint)
+            print(f"Model weights successfully loaded.")
+            
+        # sys.exit()
+
+        # Training, Generating, or Evaluating the model
+        if args.generate:
+            print(f"Generating images...")
+            if (args.dataset == "mnist"):
+                gen_sample = [sample for sample in data.take(2)][0]
+                generate(vae, gen_sample, args.path_img_output)
+            elif (args.dataset == "cloud"):
+                reconstruct_img(vae, data, normalizer=normalizer, padder=padder, 
+                                img_folder=args.path_img_output, prefix_name='cloud')
         else:
-            # Training parameters
-            epochs = args.epochs
-            lr = args.learning_rate
-            lr_min = args.learning_rate_min
-            train_portion = args.train_portion
+            if args.eval:
+                print("Evaluation...")
+                evaluate(vae, data, model_path=model_path, 
+                        save_encoding=args.save_encoding, padding=None)
+            else:
+                # Training parameters
+                epochs = args.epochs
+                lr = args.learning_rate
+                lr_min = args.learning_rate_min
+                train_portion = args.train_portion
 
-            # optimizer
-            decay_steps = int(data.cardinality().numpy() * train_portion) * (epochs/4)
-            lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
-                lr, first_decay_steps=decay_steps,
-                t_mul=10, m_mul=1.0, alpha=lr_min/lr)
-            optimizer = tf.keras.optimizers.Adamax(learning_rate=lr_schedule)
-            
-            
+                # optimizer
+                decay_steps = int(data.cardinality().numpy() * train_portion) * (epochs/4)
+                # lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+                #    lr, first_decay_steps=decay_steps,
+                #    t_mul=10, m_mul=1.0, alpha=lr_min/lr)
 
-            train(vae, data, epochs=epochs, optimizer=optimizer, train_portion=train_portion,
-                model_dir=model_path, batch_size=args.batch_size, 
-                kl_anneal_portion=args.kl_anneal_portion,
-                epochs_til_ckpt=args.epochs_til_ckpt, 
-                steps_til_summary=args.steps_til_summary,
-                resume_checkpoint=resume_checkpoint)
+                lr_schedule = utils.CosineDecayRestarts(
+                    lr, first_decay_steps=decay_steps,
+                    t_mul=10, m_mul=1.0, alpha=lr_min/lr)
+
+                optimizer = tf.keras.optimizers.Adamax(learning_rate=lr_schedule)
+                
+                start_training = timeit.default_timer()
+                vae.compile(optimizer=optimizer, loss="mse")
+                history = vae.fit(
+                        data_set,
+                        batch_size=batch_size,
+                        epochs=args.epochs,
+                        shuffle=True)
+                print(f"Training time: {timeit.default_timer()-start_training}")
+                # train(vae, data, epochs=epochs, optimizer=optimizer, train_portion=train_portion,
+                #    model_dir=model_path, batch_size=args.batch_size, 
+                #    kl_anneal_portion=args.kl_anneal_portion,
+                #    epochs_til_ckpt=args.epochs_til_ckpt, 
+                #    steps_til_summary=args.steps_til_summary,
+                #    resume_checkpoint=resume_checkpoint)
 
 
 if __name__ == '__main__':
